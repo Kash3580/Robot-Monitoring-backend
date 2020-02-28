@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,20 +27,25 @@ type DataPoint struct {
 	Points    string
 }
 
+type Roles struct {
+	RoleId   int
+	PageName string
+}
 type User struct {
 	//ID       int    `json:"id"`
-
 	FirstName string `json:"firstName"`
-
-	LastName string `json:"lastName"`
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Role     int    `json:"role"`
+	LastName  string `json:"lastName"`
+	Email     string `json:"email"`
+	Password  string `json:"password"`
+	Role      int    `json:"role"`
 }
 
-type JWT struct {
-	Token string `json:"token"`
+type RequestValidator struct {
+	Token    string `json:"token"`
+	PageName string `json:"pagename"`
 }
+
+var roles []Roles
 
 func readPackets(s socketio.Conn, ser *net.UDPConn) {
 
@@ -109,14 +115,14 @@ func insertUserMySQL(db *sql.DB, user User) {
 
 }
 
-func VerifyUserExist(db *sql.DB, user User) bool {
+func VerifyUserExist(db *sql.DB, user User) (User, bool) {
 
 	fmt.Println(time.Now().Format("2006.01.02 15:04:05"))
 	record, err := db.Query("Select firstname,lastname,email,password,role_id from user where   email='" + user.Email + "' and password='" + user.Password + "'")
 
 	if err != nil {
 		panic(err.Error())
-		return false
+		return User{}, false
 	}
 
 	dbuser := User{}
@@ -133,11 +139,36 @@ func VerifyUserExist(db *sql.DB, user User) bool {
 		dbuser.Role = roleid
 	}
 	if dbuser.Email != "" {
-		return true
+		return dbuser, true
 	}
 
 	defer record.Close()
-	return false
+	return User{}, false
+}
+
+func getAllRoles(db *sql.DB) []Roles {
+	dbroles := []Roles{}
+	record, err := db.Query("select ur.role_id,p.PageName from user_role_mapping rm inner join user_roles ur on rm.role_id=ur.role_id inner join pages p on p.id=rm.page_id;")
+
+	if err != nil {
+		panic(err.Error())
+		return dbroles
+	}
+
+	for record.Next() {
+		var roleid int
+		var pagename string
+		err = record.Scan(&roleid, &pagename)
+		if err != nil {
+			panic(err.Error())
+		}
+		dbrole := Roles{roleid, pagename}
+		dbroles = append(dbroles, dbrole)
+	}
+
+	defer record.Close()
+	defer db.Close()
+	return dbroles
 }
 
 func getSqlConnection() *sql.DB {
@@ -190,6 +221,7 @@ func main() {
 		fmt.Printf("Some error %v\n", err)
 		return
 	}
+
 	ser := getSocketConn()
 	server.OnConnect("/", func(s socketio.Conn) error {
 		if s == nil {
@@ -202,19 +234,6 @@ func main() {
 		readPackets(s, ser)
 
 		return nil
-	})
-	server.OnEvent("/msg", "notice", func(s socketio.Conn, msg string) {
-		fmt.Println("notice:", msg)
-
-		fmt.Println("connected:", s.ID())
-
-		//readPackets(s)
-
-	})
-	server.OnEvent("/user", "msg", func(s socketio.Conn, msg string) {
-		fmt.Println("notice:", msg)
-		fmt.Println("connected:", s.ID())
-		//	readPackets(s)
 	})
 
 	server.OnError("/", func(s socketio.Conn, e error) {
@@ -235,16 +254,94 @@ func main() {
 		router.POST("/validatetoken", validateRequest)
 		router.POST("/forgot-password", forgotPassword)
 		router.POST("/newpassword", resetPassword)
-		router.Run(":4001")
+		router.POST("/dashboard", dashboard)
+		router.GET("/abc", abc)
+		// certManager := autocert.Manager{
+		// 	Prompt: autocert.AcceptTOS,
+		// 	Cache:  autocert.DirCache("certs"),
+		// }
+
+		// server := &http.Server{
+		// 	Addr:    ":4001",
+		// 	Handler: router,
+		// 	TLSConfig: &tls.Config{
+		// 		GetCertificate: certManager.GetCertificate,
+		// 	},
+		// }
+		err := http.ListenAndServeTLS(":4001", "https-server.crt", "https-server.key", router)
+		if err != nil {
+			log.Fatal(err)
+		}
+		//server.ListenAndServeTLS("https-server.crt", "https-server.key")
 	}()
 
 	http.Handle("/socket.io/", server)
 	http.Handle("/", http.FileServer(http.Dir("./asset1")))
 	log.Println("Serving at localhost:4000...")
 	log.Fatal(http.ListenAndServe(":4000", nil))
+	log.Fatal(http.ListenAndServeTLS(":4000", "cert.pem", "key.pem", nil))
 
 	return
 }
+
+func abc(c *gin.Context) {
+	fmt.Println("https request successs")
+}
+func dashboard(c *gin.Context) {
+
+	//isValid := validateRequest(c)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": true,
+	})
+}
+
+func validateRequest(c *gin.Context) {
+	var req RequestValidator
+	db := getSqlConnection()
+
+	body := c.Request.Body
+	x, _ := ioutil.ReadAll(body)
+	fmt.Println(string(x))
+
+	err := json.Unmarshal(x, &req)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"message": false,
+		})
+
+		return
+	}
+	if len(roles) == 0 {
+		roles = getAllRoles(db)
+	}
+	db.Close()
+	emailstring, isValid := ParseToken(req.Token)
+	if isValid {
+		res := strings.Split(emailstring, ":")
+		r, _ := strconv.Atoi(res[1])
+		if ValidateRole(roles, r, req.PageName) {
+			c.JSON(http.StatusOK, gin.H{
+				"message": true,
+			})
+		} else {
+			c.JSON(http.StatusOK, gin.H{
+				"message": false,
+			})
+		}
+	}
+}
+
+func ValidateRole(a []Roles, roleid int, page string) bool {
+	for _, n := range a {
+		if roleid == n.RoleId && n.PageName == page {
+			return true
+		}
+	}
+	return false
+}
+
 func registerUser(c *gin.Context) {
 	db := getSqlConnection()
 	var user User
@@ -275,6 +372,7 @@ func registerUser(c *gin.Context) {
 }
 func userAuth(c *gin.Context) {
 	var user User
+	var dbuser User
 	var token string
 	db := getSqlConnection()
 
@@ -286,11 +384,11 @@ func userAuth(c *gin.Context) {
 	_ = json.Unmarshal(x, &user)
 	fmt.Println(user.Email)
 
-	isValid := VerifyUserExist(db, user)
+	dbuser, isValid := VerifyUserExist(db, user)
 	db.Close()
 
 	if isValid {
-		token, _ = GenerateToken(user)
+		token, _ = GenerateToken(dbuser)
 	} else {
 		token = "Not Found"
 	}
@@ -313,7 +411,7 @@ func forgotPassword(c *gin.Context) {
 	token, _ := GenerateToken(user)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "http://localhost:3000/reset-password/?id=" + token,
+		"message": "https://localhost:3000/reset-password/?id=" + token,
 	})
 
 }
@@ -334,33 +432,24 @@ func resetPassword(c *gin.Context) {
 
 }
 
-func validateRequest(c *gin.Context) {
-
-	body := c.Request.Body
-	x, _ := ioutil.ReadAll(body)
-	fmt.Println(string(x))
-
-	isValid, _ := ParseToken(string(x))
-	fmt.Println("token value :", isValid)
-	c.JSON(http.StatusOK, gin.H{
-		"message": isValid,
-	})
-
-}
-
-func ParseToken(mytoken string) (bool, error) {
+func ParseToken(mytoken string) (string, bool) {
 	secret := "secret"
 	token, err := jwt.Parse(mytoken, func(token *jwt.Token) (interface{}, error) {
 		return []byte(secret), nil
 	})
+	claims := token.Claims.(jwt.MapClaims)
+	fmt.Println()
 
 	if err == nil && token.Valid {
 		//	fmt.Println("Your token is valid.  I like your style.")
-		return true, nil
+		x, _ := claims["role"].(float64)
+		roleid := strconv.FormatFloat(x, 'f', 0, 64)
+		res := claims["email"].(string) + ":" + roleid
+		return res, true
 
 	} else {
 		//	fmt.Println("This token is terrible!  I cannot accept this.")
-		return false, nil
+		return "error", false
 	}
 }
 
@@ -370,6 +459,7 @@ func GenerateToken(user User) (string, error) {
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"email": user.Email,
+		"role":  user.Role,
 		"iss":   "course",
 	})
 
