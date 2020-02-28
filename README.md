@@ -1,8 +1,8 @@
-# Robot-Monitoring-backend
+# Robot-Monitoring-Backend
 
 
 ## Creating and installing Self Signed Certificate 
-**creating  Self-signed certificate in  Linux system:**
+**Creating  Self-Signed certificate in  Linux system:**
 	
 ``` 
   sudo openssl genrsa -out server-cert.key 2048
